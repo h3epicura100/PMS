@@ -26,10 +26,33 @@ const write = (key, data) => localStorage.setItem(key, JSON.stringify(data));
 const readCounter = () => parseInt(localStorage.getItem(KEYS.COUNTER) || '0');
 const writeCounter = (val) => localStorage.setItem(KEYS.COUNTER, String(val));
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Wraps fetch() with retries — Google Apps Script Web Apps intermittently
+ * 404 or hang shortly after (re)deploying, or just under load. Retries a
+ * few times with a short backoff before giving up, so a single transient
+ * hiccup doesn't surface as a hard failure to the user.
+ */
+const fetchWithRetry = async (url, options = {}, retries = 2, delayMs = 800) => {
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const response = await fetch(url, options);
+      if (response.ok) return response;
+      lastError = new Error(`Request failed with status ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < retries) await sleep(delayMs * (attempt + 1));
+  }
+  throw lastError;
+};
+
 // --- GAS SUBMISSION ---
 export const submitToSheet = async (sheetName, rowData) => {
   try {
-    const response = await fetch(SCRIPT_URL, {
+    const response = await fetchWithRetry(SCRIPT_URL, {
       method: 'POST',
       body: new URLSearchParams({
         action: 'insert',
@@ -37,7 +60,7 @@ export const submitToSheet = async (sheetName, rowData) => {
         rowData: JSON.stringify(rowData),
       }),
     });
-    return true; 
+    return true;
   } catch (error) {
     console.error('Sheet submission failed:', error);
     return false;
@@ -58,7 +81,7 @@ export const uploadFileToDrive = async (file) => {
     const base64 = await base64Promise;
     const folderId = import.meta.env.VITE_FOLDER_ID;
 
-    const response = await fetch(SCRIPT_URL, {
+    const response = await fetchWithRetry(SCRIPT_URL, {
       method: 'POST',
       body: new URLSearchParams({
         action: 'uploadFile',
@@ -116,7 +139,7 @@ export const updateSheetRow = async (sheetName, rowData, orderNo) => {
     // mode: 'no-cors' is mandatory for GAS POST requests from localhost
     // Note: We cannot read the response body in no-cors mode, so we return true
     // if the fetch call itself didn't throw a network error.
-    const response = await fetch(SCRIPT_URL, {
+    const response = await fetchWithRetry(SCRIPT_URL, {
       method: 'POST',
       body: new URLSearchParams({
         action: 'update',
@@ -142,7 +165,7 @@ export const updateSheetRow = async (sheetName, rowData, orderNo) => {
  */
 export const getRawSheetData = async (sheetName) => {
   try {
-    const response = await fetch(`${SCRIPT_URL}?action=fetchPaginated&sheet=${sheetName}&page=0&pageSize=1000`);
+    const response = await fetchWithRetry(`${SCRIPT_URL}?action=fetchPaginated&sheet=${sheetName}&page=0&pageSize=1000`);
     const text = await response.text(); // Backend returns MimeType.TEXT
     const data = JSON.parse(text);
     return data.success ? data.data : [];
@@ -156,7 +179,7 @@ export const getRawSheetData = async (sheetName) => {
 export const getEventsFromSheet = async () => {
   try {
     // Use 'sheet' param (not 'sheetName') to match the new GAS backend doGet logic
-    const response = await fetch(`${SCRIPT_URL}?action=fetch&sheet=ORDER`);
+    const response = await fetchWithRetry(`${SCRIPT_URL}?action=fetch&sheet=ORDER`);
     
     // Backend now returns MimeType.TEXT, so parse as text first
     const text = await response.text();
